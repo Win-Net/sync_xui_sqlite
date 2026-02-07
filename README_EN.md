@@ -39,3 +39,13 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/Win-Net/sync_xui_sq
 ```bash
 winnet-xui
 ```
+
+## 🎁 Financial support
+If **WinNet** is useful and practical for you and you would like to support its development, you can support it financially on one of the following crypto networks:
+
+- TON network : `UQAwote266R2INGvHR2DS-B7jeSjIlxZIlx851LNvvHxmwY8`
+- USDT, TRON network(TRC20) : `THA4Lt2hUNX3L8fJkssmUPekUqwXWuYmcR`
+- ETH network(ERC20) : `0xaa47f46D809152291B011E333a93430DB4649578`
+<div align="center">
+Thank you in advance for your support ❤️🙏
+</div>

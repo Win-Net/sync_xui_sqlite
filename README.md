@@ -25,7 +25,7 @@
 ### ⚡️ دستور نصب سریع :
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/Win-Net/winnet/main/winnet.sh) install
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/Win-Net/sync_xui_sqlite/main/install.sh)"
 ```
 
 

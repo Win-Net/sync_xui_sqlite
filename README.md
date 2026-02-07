@@ -29,8 +29,10 @@ bash <(curl -s https://raw.githubusercontent.com/Win-Net/winnet/main/winnet.sh) 
 ```
 
 
-آپدیت :
+
+# رابط خط فرمان (CLI)
+
 
 ```bash
-winnet update
+winnet-xui
 ```

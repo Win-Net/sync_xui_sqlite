@@ -100,6 +100,7 @@ show_menu() {
     echo "========================================"
     echo "    WinNet XUI Sync Manager"
     echo "    Subscription Sync Tool"
+    echo "https://github.com/Win-Net/sync_xui_sqlite"
     echo "========================================"
     echo -e "${NC}"
     echo -e "  Service Status: $(get_service_status)"

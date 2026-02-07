@@ -28,8 +28,8 @@ Smart and automatic installation of all prerequisites and complete script config
 bash <(curl -s https://raw.githubusercontent.com/Win-Net/winnet/main/winnet.sh) install
 ```
 
-Update:
+# Command Line Interface (CLI)
 
 ```bash
-winnet update
+winnet-xui
 ```

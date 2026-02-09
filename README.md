@@ -43,7 +43,7 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/Win-Net/sync_xui_sq
 winnet-xui
 ```
 ---
-### ویدئو آموزشی https://youtu.be/O2VB6tuER9A
+### [مشاهده ویدئو آموزشی](https://youtu.be/O2VB6tuER9A)
 
 ---
 

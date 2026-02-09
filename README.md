@@ -42,10 +42,12 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/Win-Net/sync_xui_sq
 ```bash
 winnet-xui
 ```
----
+
+
 ### [مشاهده ویدئو آموزشی](https://youtu.be/O2VB6tuER9A)
 
 ---
+<br>
 
 ## 🎁 حمایت مالی
 اگر **وین نت** برای شما مفید و کاربردی بوده و مایل هستید از توسعه آن حمایت کنید ، می‌توانید در یکی از شبکه های کریپتو زیر حمایت مالی کنید :

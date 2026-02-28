@@ -18,7 +18,7 @@ With this script, you can easily create multi-inbound accounts with all versions
 
 ### **Tunnel inbounds equalization :**
 
--**Assimilation according to the same name in tun and tunnel bands**
+- **Assimilation according to the same name in tun and tunnel bands**
 - **Unification of tunnel & tun inbounds**
 - Unification of up, down, total traffic of tunnel and tun inbounds in 3X-UI
 - Unification of decrease/increase or reset of inbound traffic

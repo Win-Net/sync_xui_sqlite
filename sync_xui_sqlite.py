@@ -147,41 +147,6 @@ def ensure_seed(conn, debug=False):
     conn.commit()
     if debug: print(f"[INFO] seeded {n} entries")
 
-# ---------------------------------------------------------------------------
-# Restart x-ui core
-# ---------------------------------------------------------------------------
-
-def restart_xui_core(debug=False):
-    """Restart the x-ui service so the core picks up the DB changes."""
-    try:
-        result = subprocess.run(
-            ["x-ui", "restart"],
-            capture_output=True, text=True, timeout=30
-        )
-        if result.returncode == 0:
-            print("[RESTART] x-ui core restarted successfully (x-ui restart)")
-            if debug and result.stdout:
-                print("[RESTART] stdout:", result.stdout.strip())
-        else:
-            # fallback to systemctl
-            raise RuntimeError(f"x-ui restart failed: {result.stderr.strip()}")
-    except Exception as e:
-        if debug:
-            print(f"[RESTART] x-ui command failed ({e}), trying systemctl ...")
-        try:
-            result2 = subprocess.run(
-                ["systemctl", "restart", "x-ui"],
-                capture_output=True, text=True, timeout=30
-            )
-            if result2.returncode == 0:
-                print("[RESTART] x-ui core restarted successfully (systemctl restart x-ui)")
-            else:
-                print(f"[RESTART][ERROR] systemctl restart x-ui failed: {result2.stderr.strip()}")
-        except Exception as e2:
-            print(f"[RESTART][ERROR] Could not restart x-ui: {e2}")
-
-# ---------------------------------------------------------------------------
-
 def sync_once(conn, apply=False, debug=False):
     ensure_meta(conn)
     cur=conn.cursor()
@@ -302,7 +267,7 @@ def sync_once(conn, apply=False, debug=False):
             cur_up = int(e["sig"].get("up") or 0)
             cur_down = int(e["sig"].get("down") or 0)
             
-            # اگر reset flag فعال باشد، از مقا��یر reference استفاده کن
+            # اگر reset flag فعال باشد، از مقادیر reference استفاده کن
             # در غیر این صورت فقط اگر کمتر از max باشد، به max تغییر بده
             if group_reset_flag:
                 target_up = int(ref_sig.get("up") or 0)
@@ -351,8 +316,7 @@ def sync_once(conn, apply=False, debug=False):
                 plans.append({"sub":sub, "iid":e["iid"], "email":e["email"], "cid":e["cid"], 
                             "changes":ch, "ref_sig":ref_sig, "ref_client":ref_client,
                             "reset_flag": group_reset_flag, "ref_updated": ref_updated,
-                            "target_up": target_up, "target_down": target_down,
-                            "target_enable": target_enable})
+                            "target_up": target_up, "target_down": target_down})
 
     if not plans:
         print("[INFO] No changes required (all subscriptions already in sync).")
@@ -374,11 +338,6 @@ def sync_once(conn, apply=False, debug=False):
         cur.execute("UPDATE inbounds SET settings=? WHERE id=?", (jdump(s), iid))
 
     ct_writes=0; set_writes=0
-
-    # ردیابی کاربرانی که در این سیکل غیرفعال می‌شوند
-    # کلید: (sub, email) → برای جلوگیری از ریستارت چندگانه
-    newly_disabled = set()
-
     for p in plans:
         iid=p["iid"]; email=p["email"]; ch=p["changes"]; ref=p["ref_sig"]; reset_flag=p.get("reset_flag", False)
 
@@ -448,11 +407,6 @@ def sync_once(conn, apply=False, debug=False):
             new_enable = en0
             if "enable" in ch:
                 new_enable = int(ch["enable"][1])
-                # اگر کاربر دارد غیرفعال می‌شود، ثبت کن
-                if new_enable == 0 and en0 == 1:
-                    newly_disabled.add((p["sub"], email))
-                    if debug:
-                        print(f"[DISABLE] sub={p['sub']} email={email} iid={iid} → will be disabled")
 
             if rid:
                 cur.execute("UPDATE client_traffics SET up=?,down=?,total=?,expiry_time=?,enable=?,reset=0 WHERE id=?",
@@ -478,41 +432,6 @@ def sync_once(conn, apply=False, debug=False):
                     set_writes += 1
             except Exception:
                 pass
-
-    # --- علاوه بر plan‌های تغییر یافته، کاربرانی که قبلاً منقضی شده‌اند
-    #     ولی هنوز فعال هستند را هم غیرفعال کن (حتی اگر تغییر دیگری نداشته باشند)
-    # این بخش تضمین می‌کند که حتی کاربر یک‌اینباندی هم غیرفعال شود
-    inbs_fresh = load_inbounds(conn)
-    ct_fresh = load_ct_map(conn)
-    for iid_f, settings_f in inbs_fresh:
-        for cl_f in settings_f.get("clients", []):
-            sub_f = cl_f.get("subId") or cl_f.get("subscription")
-            if not sub_f:
-                continue
-            email_f = cl_f.get("email") or ""
-            ct_row_f = ct_fresh.get((iid_f, email_f))
-            if ct_row_f is None:
-                continue
-            # فقط کاربران فعال رو بررسی کن
-            current_enable = int(ct_row_f.get("enable", 1))
-            if current_enable == 0:
-                continue
-            # بررسی اینکه آیا باید غیرفعال شود
-            if not should_be_enabled(cl_f, ct_row_f):
-                rid_f = ct_row_f.get("row_id")
-                if rid_f:
-                    cur.execute(
-                        "UPDATE client_traffics SET enable=0 WHERE id=?",
-                        (rid_f,)
-                    )
-                    newly_disabled.add((sub_f, email_f))
-                    ct_writes += 1
-                    print(f"[DISABLE] Expired client disabled → sub={sub_f} email={email_f} iid={iid_f}")
-                    if debug:
-                        quota_gb = cl_f.get("totalGB", 0)
-                        expiry = cl_f.get("expiryTime", 0)
-                        used = used_from_ct(ct_row_f)
-                        print(f"          quota={quota_gb}GB used={used}B expiry={expiry}")
 
     # --- RECOMPUTE and store actual signature for each changed client ---
     now=int(time.time())
@@ -556,13 +475,6 @@ def sync_once(conn, apply=False, debug=False):
 
     conn.commit()
     print(f"[APPLIED] settings_updated={set_writes}, traffic_rows_written={ct_writes}")
-
-    # --- ریستارت هسته در صورت غیرفعال شدن هر کاربری ---
-    if newly_disabled and apply:
-        print(f"[INFO] {len(newly_disabled)} client(s) were disabled → restarting x-ui core ...")
-        for sub_d, email_d in newly_disabled:
-            print(f"       ↳ sub={sub_d} email={email_d}")
-        restart_xui_core(debug=debug)
 
     return len(plans)
 

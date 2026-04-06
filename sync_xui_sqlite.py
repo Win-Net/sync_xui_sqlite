@@ -6,9 +6,6 @@ from datetime import datetime
 
 DB_DEFAULT = "/etc/x-ui/x-ui.db"
 
-# فایل کانفیگ برای قابلیت enforce_expiry
-ENFORCE_EXPIRY_FLAG = "/etc/x-ui/enforce_expiry_enabled"
-
 def jload(s):
     if isinstance(s, dict): return s
     try: return json.loads(s)
@@ -149,222 +146,6 @@ def ensure_seed(conn, debug=False):
             if debug: print("[SEED]", sub, iid, email, jdump(sig))
     conn.commit()
     if debug: print(f"[INFO] seeded {n} entries")
-
-def is_enforce_expiry_enabled():
-    """بررسی اینکه آیا قابلیت enforce_expiry فعال است"""
-    return os.path.exists(ENFORCE_EXPIRY_FLAG)
-
-def restart_xray_core(debug=False):
-    """
-    ریستارت مستقیم هسته xray (نه پنل x-ui).
-    xray به عنوان یک پروسه فرزند توسط x-ui اجرا می‌شود.
-    ابتدا PID پروسه xray رو پیدا می‌کنیم و سیگنال SIGHUP می‌فرستیم،
-    یا از طریق x-ui API هسته رو restart می‌کنیم.
-    """
-    if debug:
-        print("[XRAY] Attempting to restart xray core...")
-
-    # روش اول: ارسال SIGHUP به پروسه xray (graceful reload)
-    try:
-        result = subprocess.run(
-            ["pgrep", "-x", "xray"],
-            capture_output=True, text=True, timeout=5
-        )
-        pids = result.stdout.strip().split()
-        if pids:
-            for pid in pids:
-                try:
-                    os.kill(int(pid), 1)  # SIGHUP = 1
-                    if debug:
-                        print(f"[XRAY] Sent SIGHUP to xray PID={pid}")
-                except Exception as e:
-                    if debug:
-                        print(f"[XRAY] SIGHUP to PID={pid} failed: {e}")
-            time.sleep(1)
-            if debug:
-                print("[XRAY] xray core restarted via SIGHUP")
-            return True
-    except Exception as e:
-        if debug:
-            print(f"[XRAY] pgrep xray failed: {e}")
-
-    # روش دوم: kill و منتظر بمان تا x-ui آن را restart کند
-    try:
-        result = subprocess.run(
-            ["pkill", "-SIGTERM", "-x", "xray"],
-            capture_output=True, text=True, timeout=5
-        )
-        if debug:
-            print(f"[XRAY] Sent SIGTERM to xray, x-ui will restart it automatically")
-        time.sleep(2)
-        return True
-    except Exception as e:
-        if debug:
-            print(f"[XRAY] pkill xray failed: {e}")
-
-    # روش سوم: استفاده از x-ui CLI برای restart هسته
-    try:
-        result = subprocess.run(
-            ["x-ui", "restart"],
-            capture_output=True, text=True, timeout=15
-        )
-        if result.returncode == 0:
-            if debug:
-                print("[XRAY] xray core restarted via x-ui restart")
-            return True
-        else:
-            if debug:
-                print(f"[XRAY] x-ui restart failed: {result.stderr}")
-    except Exception as e:
-        if debug:
-            print(f"[XRAY] x-ui restart exception: {e}")
-
-    if debug:
-        print("[XRAY] WARNING: All restart methods failed!")
-    return False
-
-def enforce_expiry_check(conn, apply=False, debug=False):
-    """
-    پاس مستقل برای بررسی انقضای کاربران:
-    - اگه کاربر فقط از نظر ترافیک منقضی شده:
-        1. توی همه اینباندها enable=0 بشه (client_traffics + inbound settings)
-        2. هسته xray ریستارت بشه
-    - اگه کاربر فقط از نظر تاریخ منقضی شده:
-        1. توی همه اینباندها enable=0 بشه
-        2. نیازی به ریستارت نیست
-    - اگه هنوز فعاله و منقضی نشده: دست نزن
-    """
-    if debug:
-        print("[ENFORCE] Running expiry enforcement check...")
-
-    cur = conn.cursor()
-    ct = load_ct_map(conn)
-    inbs = load_inbounds(conn)
-
-    # گروه‌بندی کاربران بر اساس subId
-    sub_groups = {}  # sub -> list of (iid, client, ct_row)
-    for iid, settings in inbs:
-        for cl in settings.get("clients", []):
-            sub = cl.get("subId") or cl.get("subscription")
-            if not sub:
-                continue
-            email = cl.get("email") or ""
-            ct_row = ct.get((iid, email))
-            sub_groups.setdefault(sub, []).append((iid, cl, ct_row))
-
-    need_xray_restart = False
-    disabled_count = 0
-
-    for sub, members in sub_groups.items():
-        # برای هر subId، بررسی می‌کنیم آیا در هر اینباند کاربر هنوز فعاله ولی باید غیرفعال بشه
-
-        # محاسبه max ترافیک مصرفی در همه اینباندها (برای تشخیص دقیق انقضای ترافیک)
-        max_up = max((int((m[2] or {}).get("up") or 0) for m in members), default=0)
-        max_down = max((int((m[2] or {}).get("down") or 0) for m in members), default=0)
-        max_used = max_up + max_down
-
-        for iid, cl, ct_row in members:
-            email = cl.get("email") or ""
-            cid = cl.get("id") or ""
-
-            # وضعیت فعلی enable در client_traffics
-            cur_enable_ct = int((ct_row or {}).get("enable", 1))
-
-            # اگه قبلا غیرفعال شده، دیگه بررسی نکن
-            if cur_enable_ct == 0:
-                continue
-
-            # دریافت تنظیمات کاربر
-            quota_gb = cl.get("totalGB", 0)
-            try:
-                quota_gb = int(quota_gb) if quota_gb else 0
-            except:
-                quota_gb = 0
-
-            expiry = cl.get("expiryTime", 0)
-            try:
-                expiry = int(expiry) if expiry else 0
-            except:
-                expiry = 0
-
-            # بررسی انقضا بر اساس ترافیک (با max ترافیک همه اینباندها)
-            expired_by_traffic = is_expired_by_traffic(quota_gb, max_used)
-            # بررسی انقضا بر اساس تاریخ
-            expired_by_date = is_expired_by_date(expiry)
-
-            if not expired_by_traffic and not expired_by_date:
-                # هنوز فعال و منقضی نشده - دست نزن
-                continue
-
-            # کاربر باید غیرفعال بشه
-            if debug:
-                reason = []
-                if expired_by_traffic:
-                    reason.append(f"traffic(used={max_used}, quota={quota_gb}GB)")
-                if expired_by_date:
-                    reason.append(f"date(expiry={expiry})")
-                print(f"[ENFORCE] Disabling sub={sub} iid={iid} email={email} reason={','.join(reason)}")
-
-            if apply:
-                # ۱. غیرفعال کردن در client_traffics
-                if ct_row and ct_row.get("row_id"):
-                    cur.execute(
-                        "UPDATE client_traffics SET enable=0 WHERE id=?",
-                        (ct_row["row_id"],)
-                    )
-                else:
-                    # ردیف وجود نداره، insert کن
-                    cur.execute(
-                        "INSERT INTO client_traffics(inbound_id,enable,email,up,down,expiry_time,total,reset) VALUES(?,0,?,?,?,?,?,0)",
-                        (iid, email,
-                         int((ct_row or {}).get("up") or 0),
-                         int((ct_row or {}).get("down") or 0),
-                         expiry,
-                         int((ct_row or {}).get("quota_db") or 0))
-                    )
-
-                # ۲. غیرفعال کردن در settings اینباند (inbound settings JSON)
-                cur.execute("SELECT settings FROM inbounds WHERE id=?", (iid,))
-                row = cur.fetchone()
-                if row:
-                    s = jload(row[0])
-                    changed = False
-                    for c in s.get("clients", []):
-                        c_sub = c.get("subId") or c.get("subscription") or ""
-                        c_email = c.get("email") or ""
-                        if c_sub == sub and c_email == email:
-                            if c.get("enable", True) not in (False, 0, "0"):
-                                c["enable"] = False
-                                changed = True
-                            break
-                    if changed:
-                        cur.execute(
-                            "UPDATE inbounds SET settings=? WHERE id=?",
-                            (jdump(s), iid)
-                        )
-
-            disabled_count += 1
-
-            # فقط انقضای ترافیک نیاز به ریستارت هسته دارد
-            if expired_by_traffic:
-                need_xray_restart = True
-
-    if apply and disabled_count > 0:
-        conn.commit()
-        print(f"[ENFORCE] Disabled {disabled_count} client(s) across inbounds.")
-
-        if need_xray_restart:
-            print("[ENFORCE] Traffic expiry detected -> restarting xray core...")
-            restart_xray_core(debug=debug)
-        else:
-            print("[ENFORCE] Date-only expiry -> xray restart not needed.")
-    elif not apply and disabled_count > 0:
-        print(f"[ENFORCE] [DRY-RUN] Would disable {disabled_count} client(s). Need xray restart: {need_xray_restart}")
-    else:
-        if debug:
-            print("[ENFORCE] No expired-but-active clients found.")
-
-    return disabled_count
 
 def sync_once(conn, apply=False, debug=False):
     ensure_meta(conn)
@@ -539,9 +320,6 @@ def sync_once(conn, apply=False, debug=False):
 
     if not plans:
         print("[INFO] No changes required (all subscriptions already in sync).")
-        # حتی اگه sync تغییری نداشت، enforce_expiry رو اجرا کن
-        if is_enforce_expiry_enabled():
-            enforce_expiry_check(conn, apply=apply, debug=debug)
         return 0
 
     # --- APPLY ---
@@ -697,10 +475,6 @@ def sync_once(conn, apply=False, debug=False):
 
     conn.commit()
     print(f"[APPLIED] settings_updated={set_writes}, traffic_rows_written={ct_writes}")
-
-    # بعد از sync معمولی، enforce_expiry رو هم اجرا کن
-    if is_enforce_expiry_enabled():
-        enforce_expiry_check(conn, apply=apply, debug=debug)
 
     return len(plans)
 

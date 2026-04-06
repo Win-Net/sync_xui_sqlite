@@ -73,25 +73,6 @@ is_installed() {
     [ -f "$SCRIPT_PATH" ] && [ -f "$SERVICE_PATH" ]
 }
 
-write_enforce_service() {
-    cat > "$ENFORCE_SERVICE_PATH" << 'SVEOF'
-[Unit]
-Description=WinNet - Enforce Expiry (disable expired clients & restart xray)
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/bin/bash /usr/local/bin/enforce_expiry.sh /etc/x-ui/x-ui.db 60
-Restart=always
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-SVEOF
-}
-
 install_cli() {
     cat > "$CLI_CMD" << 'EOFCLI'
 #!/bin/bash
@@ -134,23 +115,23 @@ get_service_status() {
     fi
 }
 
-write_enforce_service() {
-    cat > "$ENFORCE_SERVICE_PATH" << 'SVEOF'
+install_enforce_service() {
+    if [ ! -f "$ENFORCE_SERVICE_PATH" ]; then
+        cat > "$ENFORCE_SERVICE_PATH" << 'EOFSERVICE'
 [Unit]
-Description=WinNet - Enforce Expiry (disable expired clients & restart xray)
+Description=WinNet Enforce Expiry
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/bin/bash /usr/local/bin/enforce_expiry.sh /etc/x-ui/x-ui.db 60
+ExecStart=/bin/bash /usr/local/bin/enforce_expiry.sh
 Restart=always
 RestartSec=10
-StandardOutput=journal
-StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
-SVEOF
+EOFSERVICE
+    fi
 }
 
 show_menu() {
@@ -162,9 +143,9 @@ show_menu() {
     echo "https://github.com/Win-Net/sync_xui_sqlite"
     echo "========================================"
     echo -e "${NC}"
-    echo -e "  Client Sync:    $(get_service_status sync_xui.service)"
-    echo -e "  Tunnel Sync:    $(get_service_status sync_inbound_tunnel.service)"
-    echo -e "  Enforce Expiry: $(get_service_status enforce_expiry.service)"
+    echo -e "  Client Sync:     $(get_service_status sync_xui.service)"
+    echo -e "  Tunnel Sync:     $(get_service_status sync_inbound_tunnel.service)"
+    echo -e "  Enforce Expiry:  $(get_service_status enforce_expiry.service)"
     echo ""
     echo "  ----- Client Subscription Sync -----"
     echo ""
@@ -182,13 +163,12 @@ show_menu() {
     echo ""
     echo -e "  ${GREEN}7)${NC} Enable Enforce Expiry"
     echo -e "  ${RED}8)${NC} Disable Enforce Expiry"
-    echo -e "  ${BLUE}9)${NC} Update Enforce Expiry Script"
     echo ""
     echo "  ------------------------------------"
     echo ""
-    echo -e "  ${BLUE}10)${NC} Update All"
-    echo -e "  ${YELLOW}11)${NC} Uninstall Everything"
-    echo -e "  ${CYAN}0)${NC}  Exit"
+    echo -e "  ${BLUE}9)${NC} Update All"
+    echo -e "  ${YELLOW}10)${NC} Uninstall Everything"
+    echo -e "  ${CYAN}0)${NC} Exit"
     echo ""
     echo "  ------------------------------------"
     echo ""
@@ -325,11 +305,9 @@ update_tunnel_sync() {
 
 enable_enforce_expiry() {
     echo ""
-    echo -e "${BLUE}[i]${NC} Enabling Enforce Expiry service..."
-
-    # اگه اسکریپت وجود نداره، دانلود کن
+    # Download script if not present
     if [ ! -f "$ENFORCE_SCRIPT_PATH" ]; then
-        echo -e "${BLUE}[i]${NC} Enforce expiry script not found. Downloading..."
+        echo -e "${BLUE}[i]${NC} Enforce expiry not installed. Downloading..."
         if curl -fsSL "$GITHUB_RAW/enforce_expiry.sh" -o "$ENFORCE_SCRIPT_PATH"; then
             chmod 755 "$ENFORCE_SCRIPT_PATH"
             echo -e "${GREEN}[OK]${NC} Enforce expiry script downloaded."
@@ -339,34 +317,19 @@ enable_enforce_expiry() {
             return
         fi
     fi
-
-    # چک کردن sqlite3
-    if ! command -v sqlite3 >/dev/null 2>&1; then
+    # Install sqlite3 if needed
+    if ! command -v sqlite3 &>/dev/null; then
         echo -e "${BLUE}[i]${NC} Installing sqlite3..."
         apt install -y sqlite3 > /dev/null 2>&1
-        if command -v sqlite3 >/dev/null 2>&1; then
-            echo -e "${GREEN}[OK]${NC} sqlite3 installed."
-        else
-            echo -e "${RED}[ERROR]${NC} Failed to install sqlite3."
-            read -p "Press Enter to continue..." _
-            return
-        fi
+        echo -e "${GREEN}[OK]${NC} sqlite3 installed."
     fi
-
-    # ساخت service file
-    write_enforce_service
-    echo -e "${GREEN}[OK]${NC} Enforce expiry service file created."
-
+    # Create service file if not present
+    install_enforce_service
     systemctl daemon-reload
     systemctl enable --now enforce_expiry.service > /dev/null 2>&1
     systemctl start enforce_expiry.service > /dev/null 2>&1
-
     if systemctl is-active --quiet enforce_expiry.service; then
         echo -e "${GREEN}[OK]${NC} Enforce expiry service enabled and started."
-        echo ""
-        echo -e "${CYAN}[i]${NC} Behavior:"
-        echo -e "     Traffic expired  → disable client in ALL inbounds + restart xray"
-        echo -e "     Date expired     → disable client in ALL inbounds (no xray restart)"
     else
         echo -e "${RED}[ERROR]${NC} Failed to start enforce expiry service."
         echo -e "${YELLOW}[!]${NC} Check logs: sudo journalctl -u enforce_expiry.service -f"
@@ -377,35 +340,10 @@ enable_enforce_expiry() {
 
 disable_enforce_expiry() {
     echo ""
-    echo -e "${BLUE}[i]${NC} Disabling Enforce Expiry service..."
+    echo -e "${BLUE}[i]${NC} Disabling enforce expiry service..."
     systemctl disable --now enforce_expiry.service > /dev/null 2>&1
     systemctl stop enforce_expiry.service > /dev/null 2>&1
     echo -e "${GREEN}[OK]${NC} Enforce expiry service disabled."
-    echo ""
-    read -p "Press Enter to continue..." _
-}
-
-update_enforce_expiry() {
-    echo ""
-    echo -e "${BLUE}[i]${NC} Updating enforce expiry from GitHub..."
-    systemctl stop enforce_expiry.service > /dev/null 2>&1
-    if curl -fsSL "$GITHUB_RAW/enforce_expiry.sh" -o "$ENFORCE_SCRIPT_PATH"; then
-        chmod 755 "$ENFORCE_SCRIPT_PATH"
-        echo -e "${GREEN}[OK]${NC} Enforce expiry script updated."
-    else
-        echo -e "${RED}[ERROR]${NC} Failed to download enforce expiry script."
-        read -p "Press Enter to continue..." _
-        return
-    fi
-    # بازنویسی service file
-    write_enforce_service
-    systemctl daemon-reload
-    if systemctl is-enabled --quiet enforce_expiry.service 2>/dev/null; then
-        systemctl start enforce_expiry.service > /dev/null 2>&1
-        echo -e "${GREEN}[OK]${NC} Enforce expiry service restarted."
-    fi
-    echo ""
-    echo -e "${GREEN}${BOLD}Enforce expiry update completed!${NC}"
     echo ""
     read -p "Press Enter to continue..." _
 }
@@ -439,16 +377,21 @@ update_all() {
         echo -e "${GREEN}[OK]${NC} Tunnel sync service file updated."
     fi
 
-    # Update enforce expiry
+    # Update enforce expiry (migration: download even if not previously installed)
     systemctl stop enforce_expiry.service > /dev/null 2>&1
     if curl -fsSL "$GITHUB_RAW/enforce_expiry.sh" -o "$ENFORCE_SCRIPT_PATH"; then
         chmod 755 "$ENFORCE_SCRIPT_PATH"
         echo -e "${GREEN}[OK]${NC} Enforce expiry script updated."
     else
-        echo -e "${YELLOW}[!]${NC} Failed to download enforce expiry script (may not exist yet)."
+        echo -e "${YELLOW}[!]${NC} Failed to download enforce expiry script."
     fi
-    write_enforce_service
-    echo -e "${GREEN}[OK]${NC} Enforce expiry service file updated."
+    # Create service file if missing (migration for old installs)
+    install_enforce_service
+    # Install sqlite3 if missing
+    if ! command -v sqlite3 &>/dev/null; then
+        apt install -y sqlite3 > /dev/null 2>&1
+        echo -e "${GREEN}[OK]${NC} sqlite3 installed."
+    fi
 
     # Update dependencies
     "$VENV_PATH/bin/pip" install --upgrade requests > /dev/null 2>&1
@@ -479,6 +422,7 @@ update_all() {
 
     echo ""
     echo -e "${GREEN}${BOLD}All updates completed!${NC}"
+    echo -e "${BLUE}[i]${NC} To enable Enforce Expiry: select option 7 from menu."
     echo ""
     read -p "Press Enter to continue..." _
 }
@@ -496,19 +440,16 @@ uninstall() {
     echo ""
     echo -e "${BLUE}[i]${NC} Removing..."
 
-    # Stop and remove client sync
     systemctl stop sync_xui.service > /dev/null 2>&1
     systemctl disable sync_xui.service > /dev/null 2>&1
     rm -f "$SERVICE_PATH"
     echo -e "${GREEN}[OK]${NC} Client sync service removed."
 
-    # Stop and remove tunnel sync
     systemctl stop sync_inbound_tunnel.service > /dev/null 2>&1
     systemctl disable sync_inbound_tunnel.service > /dev/null 2>&1
     rm -f "$TUNNEL_SERVICE_PATH"
     echo -e "${GREEN}[OK]${NC} Tunnel sync service removed."
 
-    # Stop and remove enforce expiry
     systemctl stop enforce_expiry.service > /dev/null 2>&1
     systemctl disable enforce_expiry.service > /dev/null 2>&1
     rm -f "$ENFORCE_SERVICE_PATH"
@@ -543,23 +484,41 @@ while true; do
     show_menu
     read -p "  Select: " choice
     case $choice in
-        1)  enable_client_sync ;;
-        2)  disable_client_sync ;;
-        3)  update_client_sync ;;
-        4)  enable_tunnel_sync ;;
-        5)  disable_tunnel_sync ;;
-        6)  update_tunnel_sync ;;
-        7)  enable_enforce_expiry ;;
-        8)  disable_enforce_expiry ;;
-        9)  update_enforce_expiry ;;
-        10) update_all ;;
-        11) uninstall ;;
-        0)  echo ""; echo -e "${CYAN}Bye!${NC}"; echo ""; exit 0 ;;
-        *)  echo -e "${RED}[ERROR]${NC} Invalid option!"; sleep 1 ;;
+        1) enable_client_sync ;;
+        2) disable_client_sync ;;
+        3) update_client_sync ;;
+        4) enable_tunnel_sync ;;
+        5) disable_tunnel_sync ;;
+        6) update_tunnel_sync ;;
+        7) enable_enforce_expiry ;;
+        8) disable_enforce_expiry ;;
+        9) update_all ;;
+        10) uninstall ;;
+        0) echo ""; echo -e "${CYAN}Bye!${NC}"; echo ""; exit 0 ;;
+        *) echo -e "${RED}[ERROR]${NC} Invalid option!"; sleep 1 ;;
     esac
 done
 EOFCLI
     chmod +x "$CLI_CMD"
+}
+
+install_enforce_service() {
+    if [ ! -f "$ENFORCE_SERVICE_PATH" ]; then
+        cat > "$ENFORCE_SERVICE_PATH" << 'EOFSERVICE'
+[Unit]
+Description=WinNet Enforce Expiry
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash /usr/local/bin/enforce_expiry.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOFSERVICE
+    fi
 }
 
 install() {
@@ -628,8 +587,7 @@ install() {
     else
         print_warn "Failed to download tunnel sync service file (optional)."
     fi
-    # Enforce expiry service رو مستقیم می‌سازیم (نیازی به دانلود نیست)
-    write_enforce_service
+    install_enforce_service
     print_status "Enforce expiry service file created."
 
     print_info "Step 9/9: Running init..."
@@ -646,8 +604,6 @@ install() {
     fi
 
     systemctl daemon-reload
-
-    # Enable only client sync by default
     systemctl enable --now sync_xui.service > /dev/null 2>&1
     systemctl start sync_xui.service > /dev/null 2>&1
 
@@ -658,9 +614,9 @@ install() {
     echo "  Installation completed successfully!"
     echo "========================================${NC}"
     echo ""
-    print_info "Client sync:    ${GREEN}Enabled${NC}"
-    print_info "Tunnel sync:    ${YELLOW}Disabled${NC} (enable via menu)"
-    print_info "Enforce expiry: ${YELLOW}Disabled${NC} (enable via menu)"
+    print_info "Client sync:     ${GREEN}Enabled${NC}"
+    print_info "Tunnel sync:     ${YELLOW}Disabled${NC} (enable via menu option 4)"
+    print_info "Enforce Expiry:  ${YELLOW}Disabled${NC} (enable via menu option 7)"
     print_info "To manage, run: ${CYAN}${BOLD}sudo winnet-xui${NC}"
     echo ""
 }

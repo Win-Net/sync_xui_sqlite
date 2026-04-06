@@ -1,4 +1,4 @@
-[English](/README_EN.md) | [فارسی](/README.md) | [آموزش نصب دستی](/Manual_Install.md)
+[English](/README_EN.md) | [فارسی](/README.md) 
 
 # 🏆وین نت | WinNet #
 **وین نت** - اسکریپت یکسان سازی بر طبق سابسکریپشن <br>
@@ -45,7 +45,7 @@ winnet-xui
 ```
 
 
-### [مشاهده ویدئو آموزشی](https://youtu.be/O2VB6tuER9A)
+### [آموزش نصب دستی](/Manual_Install.md)  |  [مشاهده ویدئو آموزشی](https://youtu.be/O2VB6tuER9A)
 
 
 <br>

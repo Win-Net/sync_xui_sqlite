@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 DB_DEFAULT="/etc/x-ui/x-ui.db"
 INTERVAL_DEFAULT=30
@@ -21,7 +21,7 @@ require_root() {
 
 # ─── db ─────────────────────────────────────────────────────────────────────
 
-q() { sqlite3 -separator '|' "$DB_PATH" "$1" 2>/dev/null; }
+q() { sqlite3 -separator '|' "$DB_PATH" "$1" 2>/dev/null || true; }
 
 get_expired_clients() {
     local now
@@ -44,13 +44,13 @@ disable_client_traffic() {
     local iid="$1" email="$2"
     sqlite3 "$DB_PATH" \
         "UPDATE client_traffics SET enable=0
-         WHERE inbound_id=${iid} AND email='${email}';" 2>/dev/null
+         WHERE inbound_id=${iid} AND email='${email}';" 2>/dev/null || true
 }
 
 disable_client_inbound() {
     local iid="$1" email="$2"
     command -v python3 &>/dev/null || return 0
-    python3 - "$DB_PATH" "$iid" "$email" <<'PYEOF'
+    python3 - "$DB_PATH" "$iid" "$email" <<'PYEOF' || true
 import sys, sqlite3, json
 db, iid, email = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 conn = sqlite3.connect(db, timeout=10)
@@ -76,20 +76,20 @@ PYEOF
 }
 
 do_restart() {
-    if x-ui restart &>/dev/null; then
+    if x-ui restart &>/dev/null 2>&1; then
         info "x-ui restart executed"
         return 0
     fi
-    if systemctl restart x-ui &>/dev/null; then
+    if systemctl restart x-ui &>/dev/null 2>&1; then
         info "systemctl restart x-ui executed"
         return 0
     fi
-    if systemctl restart 3x-ui &>/dev/null; then
+    if systemctl restart 3x-ui &>/dev/null 2>&1; then
         info "systemctl restart 3x-ui executed"
         return 0
     fi
     error "restart failed — no working restart method found"
-    return 1
+    return 0
 }
 
 # ─── monitor loop ────────────────────────────────────────────────────────────
@@ -107,26 +107,28 @@ run_monitor() {
     local last_disabled=""
 
     while true; do
-        local expired
-        expired="$(get_expired_clients)"
+        local expired=""
+        expired="$(get_expired_clients)" || true
 
         if [[ -n "$expired" ]]; then
-            local now elapsed
+            local now=0 elapsed=0
             now="$(now_s)"
             elapsed=$(( now - last_restart ))
 
             if [[ "$expired" != "$last_disabled" ]] && (( elapsed >= COOLDOWN )); then
-                local iid email changed=0
+                local iid="" email="" changed=0
                 while IFS='|' read -r iid email; do
                     [[ -z "$email" ]] && continue
                     warn "disabling → inbound_id=${iid} email=${email}"
-                    disable_client_traffic "$iid" "$email" && (( changed++ )) || true
+                    disable_client_traffic "$iid" "$email" || true
                     disable_client_inbound "$iid" "$email" || true
+                    changed=$(( changed + 1 ))
                 done <<< "$expired"
 
                 if (( changed > 0 )); then
                     info "disabled ${changed} client(s) → triggering restart"
-                    do_restart && last_restart="$(now_s)" || true
+                    do_restart || true
+                    last_restart="$(now_s)"
                 fi
 
                 last_disabled="$expired"
@@ -143,7 +145,7 @@ run_monitor() {
             fi
         fi
 
-        sleep "$INTERVAL"
+        sleep "$INTERVAL" || true
     done
 }
 

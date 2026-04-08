@@ -28,6 +28,8 @@ detect_db() {
     /opt/3x-ui/x-ui.db
     /var/lib/x-ui/x-ui.db
     /var/lib/3x-ui/x-ui.db
+    /etc/x-ui/xui.db
+    /etc/3x-ui/xui.db
   )
   local p
   for p in "${paths[@]}"; do
@@ -37,8 +39,7 @@ detect_db() {
   for svc in x-ui 3x-ui; do
     if systemctl cat "${svc}.service" &>/dev/null; then
       local wd
-      wd="$(systemctl cat "${svc}.service" 2>/dev/null \
-            | sed -n 's/^WorkingDirectory=//p' | head -1)"
+      wd="$(systemctl cat "${svc}.service" 2>/dev/null | sed -n 's/^WorkingDirectory=//p' | head -1)"
       local m
       for m in "$wd/x-ui.db" "$wd/xui.db"; do
         [[ -f "$m" ]] && { echo "$m"; return 0; }
@@ -49,64 +50,44 @@ detect_db() {
     \( -name 'x-ui.db' -o -name 'xui.db' \) 2>/dev/null | head -1
 }
 
-get_expired_clients() {
+# دقیقاً همون منطق اسکریپت اصلی:
+# فقط چک میکنه ترافیک تموم شده یا نه - کاری به enable نداره
+get_depleted_clients() {
   local db="$1"
   local now
   now="$(now_ms)"
   sqlite3 -separator '|' "$db" "
-    SELECT inbound_id, email
+    SELECT DISTINCT TRIM(email) AS email
     FROM client_traffics
-    WHERE enable = 1
-      AND (
-        (total > 0 AND (up + down) >= total)
-        OR
-        (expiry_time > 0 AND expiry_time <= ${now})
-      )
-      AND email IS NOT NULL AND TRIM(email) <> ''
-    ORDER BY inbound_id, email;
+    WHERE total > 0
+      AND (up + down) >= total
+      AND email IS NOT NULL
+      AND TRIM(email) <> ''
+    ORDER BY email;
   " 2>/dev/null || true
 }
 
-disable_client_traffic() {
-  local db="$1" iid="$2" email="$3"
-  sqlite3 "$db" \
-    "UPDATE client_traffics SET enable=0
-     WHERE inbound_id=${iid} AND email='${email}';" 2>/dev/null || true
-}
-
-disable_client_inbound() {
-  local db="$1" iid="$2" email="$3"
-  command -v python3 &>/dev/null || return 0
-  python3 - "$db" "$iid" "$email" <<'PYEOF'
-import sys, sqlite3, json
-db, iid, email = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-conn = sqlite3.connect(db, timeout=10)
-cur  = conn.cursor()
-cur.execute("SELECT id, settings FROM inbounds WHERE id=?", (iid,))
-row = cur.fetchone()
-if not row:
-    conn.close(); sys.exit(0)
-rid, raw = row
-try:
-    s = json.loads(raw)
-except Exception:
-    conn.close(); sys.exit(0)
-changed = False
-for c in s.get("clients", []):
-    if (c.get("email") or "") == email:
-        c["enable"] = False
-        changed = True
-if changed:
-    cur.execute("UPDATE inbounds SET settings=? WHERE id=?",
-                (json.dumps(s, ensure_ascii=False, separators=(",",":")), rid))
-    conn.commit()
-conn.close()
-PYEOF
+get_expired_by_date_clients() {
+  local db="$1"
+  local now
+  now="$(now_ms)"
+  sqlite3 -separator '|' "$db" "
+    SELECT DISTINCT TRIM(email) AS email
+    FROM client_traffics
+    WHERE expiry_time > 0
+      AND expiry_time <= ${now}
+      AND email IS NOT NULL
+      AND TRIM(email) <> ''
+    ORDER BY email;
+  " 2>/dev/null || true
 }
 
 do_restart() {
   if command -v x-ui &>/dev/null; then
-    x-ui restart &>/dev/null && info "x-ui restart executed" && return 0
+    if x-ui restart &>/dev/null; then
+      info "x-ui restart executed"
+      return 0
+    fi
   fi
   if systemctl restart x-ui &>/dev/null; then
     info "systemctl restart x-ui executed"
@@ -116,7 +97,7 @@ do_restart() {
     info "systemctl restart 3x-ui executed"
     return 0
   fi
-  error "restart failed"
+  error "restart failed — no working restart method found"
 }
 
 run_monitor() {
@@ -129,47 +110,47 @@ run_monitor() {
   info "monitor started | db=${db} interval=${interval}s cooldown=${cooldown}s"
 
   local last_restart=0
-  local last_expired=""
+  local last_depleted=""
 
   while true; do
-    local expired
-    expired="$(get_expired_clients "$db")"
+    local depleted_traffic depleted_date all_depleted
+    depleted_traffic="$(get_depleted_clients "$db")"
+    depleted_date="$(get_expired_by_date_clients "$db")"
 
-    if [[ -n "$expired" ]]; then
+    # ترکیب هر دو و حذف تکراری
+    all_depleted="$(printf '%s\n%s\n' "$depleted_traffic" "$depleted_date" \
+      | grep -v '^[[:space:]]*$' | sort -u)"
+
+    if [[ -n "$all_depleted" ]]; then
       local now elapsed
       now="$(now_s)"
       elapsed=$(( now - last_restart ))
 
-      if [[ "$expired" != "$last_expired" ]] && (( elapsed >= cooldown )); then
-        local changed=0
-        local iid email
-        while IFS='|' read -r iid email; do
+      if [[ "$all_depleted" != "$last_depleted" ]] && (( elapsed >= cooldown )); then
+        warn "depleted clients detected:"
+        while IFS= read -r email; do
           [[ -z "$email" ]] && continue
-          warn "disabling → inbound_id=${iid} email=${email}"
-          disable_client_traffic "$db" "$iid" "$email"
-          disable_client_inbound "$db" "$iid" "$email"
-          changed=$(( changed + 1 ))
-        done <<< "$expired"
+          warn "  → email=${email}"
+        done <<< "$all_depleted"
 
-        if (( changed > 0 )); then
-          info "disabled ${changed} client(s) → triggering restart"
-          do_restart
-          last_restart="$(now_s)"
-        fi
+        local count
+        count="$(echo "$all_depleted" | grep -c '[^[:space:]]')"
+        info "triggering restart for ${count} depleted client(s)"
+        do_restart
+        last_restart="$(now_s)"
+        last_depleted="$all_depleted"
 
-        last_expired="$expired"
-
-      elif [[ "$expired" == "$last_expired" ]]; then
-        info "no change in expired clients"
+      elif [[ "$all_depleted" == "$last_depleted" ]]; then
+        info "no change in depleted clients"
       else
         info "cooldown active — $(( cooldown - elapsed ))s remaining"
       fi
     else
-      if [[ -n "$last_expired" ]]; then
-        info "all clients within limits"
-        last_expired=""
+      if [[ -n "$last_depleted" ]]; then
+        info "no depleted clients"
+        last_depleted=""
       else
-        info "checking... no expired clients"
+        info "checking... no depleted clients"
       fi
     fi
 
@@ -179,7 +160,7 @@ run_monitor() {
 
 cmd_install() {
   require_root
-  command -v sqlite3 &>/dev/null || { error "sqlite3 not found"; exit 1; }
+  command -v sqlite3 &>/dev/null || { error "sqlite3 not found — apt install sqlite3"; exit 1; }
 
   local db
   db="$(detect_db)"

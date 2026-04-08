@@ -45,9 +45,9 @@ print_banner() {
 }
 
 print_status() { echo -e "${GREEN}[OK]${NC} $1"; }
-print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
-print_info() { echo -e "${BLUE}[i]${NC} $1"; }
-print_warn() { echo -e "${YELLOW}[!]${NC} $1"; }
+print_error()  { echo -e "${RED}[ERROR]${NC} $1"; }
+print_info()   { echo -e "${BLUE}[i]${NC} $1"; }
+print_warn()   { echo -e "${YELLOW}[!]${NC} $1"; }
 
 check_root() {
     if [ "$(id -u)" -ne 0 ]; then
@@ -286,6 +286,7 @@ update_tunnel_sync() {
 
 enable_enforce_expiry() {
     echo ""
+
     if [ ! -f "$ENFORCE_SCRIPT_PATH" ]; then
         echo -e "${BLUE}[i]${NC} Enforce expiry not installed. Downloading..."
         if curl -fsSL "$GITHUB_RAW/enforce_expiry.sh" -o "$ENFORCE_SCRIPT_PATH"; then
@@ -297,24 +298,92 @@ enable_enforce_expiry() {
             return
         fi
     fi
-    if [ ! -f "$ENFORCE_SERVICE_PATH" ]; then
-        if curl -fsSL "$GITHUB_RAW/enforce_expiry.service" -o "$ENFORCE_SERVICE_PATH"; then
-            chmod 644 "$ENFORCE_SERVICE_PATH"
-            echo -e "${GREEN}[OK]${NC} Enforce expiry service file downloaded."
-        else
-            echo -e "${RED}[ERROR]${NC} Failed to download enforce expiry service file."
+
+    # تنظیم پارامترها
+    echo -e "${CYAN}${BOLD}  Enforce Expiry Configuration${NC}"
+    echo ""
+    echo -e "  ${BLUE}[i]${NC} How often should expired clients be checked?"
+    echo -e "      ${YELLOW}1)${NC} Every 30 seconds  ${CYAN}(recommended)${NC}"
+    echo -e "      ${YELLOW}2)${NC} Every 60 seconds"
+    echo -e "      ${YELLOW}3)${NC} Every 2 minutes"
+    echo -e "      ${YELLOW}4)${NC} Every 5 minutes"
+    echo ""
+    read -p "  Select check interval [1-4, default=1]: " iv_choice
+    case "$iv_choice" in
+        2) INTERVAL=60 ;;
+        3) INTERVAL=120 ;;
+        4) INTERVAL=300 ;;
+        *) INTERVAL=30 ;;
+    esac
+    echo -e "  ${GREEN}[OK]${NC} Check interval: ${INTERVAL}s"
+    echo ""
+
+    echo -e "  ${BLUE}[i]${NC} Minimum time between xray restarts (cooldown)?"
+    echo -e "      ${YELLOW}1)${NC} 60 seconds"
+    echo -e "      ${YELLOW}2)${NC} 2 minutes  ${CYAN}(recommended)${NC}"
+    echo -e "      ${YELLOW}3)${NC} 5 minutes"
+    echo -e "      ${YELLOW}4)${NC} 10 minutes"
+    echo ""
+    read -p "  Select cooldown [1-4, default=2]: " cd_choice
+    case "$cd_choice" in
+        1) COOLDOWN=60 ;;
+        3) COOLDOWN=300 ;;
+        4) COOLDOWN=600 ;;
+        *) COOLDOWN=120 ;;
+    esac
+    echo -e "  ${GREEN}[OK]${NC} Cooldown: ${COOLDOWN}s"
+    echo ""
+
+    # تشخیص DB
+    local db_path="$DB_PATH"
+    if [ ! -f "$db_path" ]; then
+        for p in /etc/3x-ui/x-ui.db /usr/local/x-ui/x-ui.db /usr/local/3x-ui/x-ui.db /opt/x-ui/x-ui.db; do
+            if [ -f "$p" ]; then db_path="$p"; break; fi
+        done
+    fi
+    if [ ! -f "$db_path" ]; then
+        echo -e "${YELLOW}[!]${NC} Database not found at default path."
+        read -p "  Enter database path manually: " db_path
+        if [ ! -f "$db_path" ]; then
+            echo -e "${RED}[ERROR]${NC} Database not found: $db_path"
             read -p "Press Enter to continue..." _
             return
         fi
     fi
+    echo -e "  ${GREEN}[OK]${NC} Database: $db_path"
+    echo ""
+
+    # ساخت service file بر اساس تنظیمات کاربر
+    cat > "$ENFORCE_SERVICE_PATH" << EOF
+[Unit]
+Description=XUI Enforce Expiry
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=${ENFORCE_SCRIPT_PATH} monitor ${db_path} ${INTERVAL} ${COOLDOWN}
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    chmod 644 "$ENFORCE_SERVICE_PATH"
+    echo -e "  ${GREEN}[OK]${NC} Service file created."
+
     systemctl daemon-reload
     systemctl enable --now enforce_expiry.service > /dev/null 2>&1
     systemctl start enforce_expiry.service > /dev/null 2>&1
+
     if systemctl is-active --quiet enforce_expiry.service; then
-        echo -e "${GREEN}[OK]${NC} Enforce expiry service enabled and started."
+        echo -e "  ${GREEN}[OK]${NC} Enforce expiry service enabled and started."
+        echo ""
+        echo -e "  ${BLUE}[i]${NC} Live logs: ${CYAN}journalctl -u enforce_expiry.service -f${NC}"
     else
-        echo -e "${RED}[ERROR]${NC} Failed to start enforce expiry service."
-        echo -e "${YELLOW}[!]${NC} Check logs: sudo journalctl -u enforce_expiry.service -f"
+        echo -e "  ${RED}[ERROR]${NC} Failed to start enforce expiry service."
+        echo -e "  ${YELLOW}[!]${NC} Check logs: journalctl -u enforce_expiry.service -f"
     fi
     echo ""
     read -p "Press Enter to continue..." _
@@ -335,7 +404,6 @@ update_all() {
     echo -e "${BLUE}[i]${NC} Updating all scripts from GitHub..."
     echo ""
 
-    # Update client sync
     systemctl stop sync_xui.service > /dev/null 2>&1
     if curl -fsSL "$GITHUB_RAW/sync_xui_sqlite.py" -o "$SCRIPT_PATH"; then
         chmod 755 "$SCRIPT_PATH"
@@ -347,7 +415,6 @@ update_all() {
         echo -e "${GREEN}[OK]${NC} Client sync service file updated."
     fi
 
-    # Update tunnel sync
     systemctl stop sync_inbound_tunnel.service > /dev/null 2>&1
     if curl -fsSL "$GITHUB_RAW/sync_inbound_tunnel.py" -o "$TUNNEL_SCRIPT_PATH"; then
         chmod 755 "$TUNNEL_SCRIPT_PATH"
@@ -359,7 +426,7 @@ update_all() {
         echo -e "${GREEN}[OK]${NC} Tunnel sync service file updated."
     fi
 
-    # Update enforce expiry (migration: download even if not previously installed)
+    # enforce expiry: فقط اسکریپت رو آپدیت کن، service file دست نزن (تنظیمات کاربر حفظ بشه)
     systemctl stop enforce_expiry.service > /dev/null 2>&1
     if curl -fsSL "$GITHUB_RAW/enforce_expiry.sh" -o "$ENFORCE_SCRIPT_PATH"; then
         chmod 755 "$ENFORCE_SCRIPT_PATH"
@@ -367,18 +434,10 @@ update_all() {
     else
         echo -e "${YELLOW}[!]${NC} Failed to download enforce expiry script."
     fi
-    if curl -fsSL "$GITHUB_RAW/enforce_expiry.service" -o "$ENFORCE_SERVICE_PATH"; then
-        chmod 644 "$ENFORCE_SERVICE_PATH"
-        echo -e "${GREEN}[OK]${NC} Enforce expiry service file updated."
-    else
-        echo -e "${YELLOW}[!]${NC} Failed to download enforce expiry service file."
-    fi
 
-    # Update dependencies
     "$VENV_PATH/bin/pip" install --upgrade requests > /dev/null 2>&1
     echo -e "${GREEN}[OK]${NC} Dependencies updated."
 
-    # Update CLI
     if curl -fsSL "$GITHUB_RAW/install.sh" -o /tmp/winnet_install_tmp.sh; then
         bash /tmp/winnet_install_tmp.sh install-cli-only
         rm -f /tmp/winnet_install_tmp.sh
@@ -387,7 +446,6 @@ update_all() {
 
     systemctl daemon-reload
 
-    # Restart only active/enabled services
     if systemctl is-enabled --quiet sync_xui.service 2>/dev/null; then
         systemctl start sync_xui.service > /dev/null 2>&1
         echo -e "${GREEN}[OK]${NC} Client sync service restarted."
@@ -465,18 +523,18 @@ while true; do
     show_menu
     read -p "  Select: " choice
     case $choice in
-        1) enable_client_sync ;;
-        2) disable_client_sync ;;
-        3) update_client_sync ;;
-        4) enable_tunnel_sync ;;
-        5) disable_tunnel_sync ;;
-        6) update_tunnel_sync ;;
-        7) enable_enforce_expiry ;;
-        8) disable_enforce_expiry ;;
-        9) update_all ;;
+        1)  enable_client_sync ;;
+        2)  disable_client_sync ;;
+        3)  update_client_sync ;;
+        4)  enable_tunnel_sync ;;
+        5)  disable_tunnel_sync ;;
+        6)  update_tunnel_sync ;;
+        7)  enable_enforce_expiry ;;
+        8)  disable_enforce_expiry ;;
+        9)  update_all ;;
         10) uninstall ;;
-        0) echo ""; echo -e "${CYAN}Bye!${NC}"; echo ""; exit 0 ;;
-        *) echo -e "${RED}[ERROR]${NC} Invalid option!"; sleep 1 ;;
+        0)  echo ""; echo -e "${CYAN}Bye!${NC}"; echo ""; exit 0 ;;
+        *)  echo -e "${RED}[ERROR]${NC} Invalid option!"; sleep 1 ;;
     esac
 done
 EOFCLI
@@ -548,12 +606,6 @@ install() {
         print_status "Tunnel sync service file installed."
     else
         print_warn "Failed to download tunnel sync service file (optional)."
-    fi
-    if curl -fsSL "$GITHUB_RAW/enforce_expiry.service" -o "$ENFORCE_SERVICE_PATH"; then
-        chmod 644 "$ENFORCE_SERVICE_PATH"
-        print_status "Enforce expiry service file installed."
-    else
-        print_warn "Failed to download enforce expiry service file (optional)."
     fi
 
     print_info "Running init..."

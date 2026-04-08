@@ -287,6 +287,7 @@ update_tunnel_sync() {
 enable_enforce_expiry() {
     echo ""
 
+    # اگر اسکریپت نصب نشده، دانلود کن
     if [ ! -f "$ENFORCE_SCRIPT_PATH" ]; then
         echo -e "${BLUE}[i]${NC} Enforce expiry not installed. Downloading..."
         if curl -fsSL "$GITHUB_RAW/enforce_expiry.sh" -o "$ENFORCE_SCRIPT_PATH"; then
@@ -299,91 +300,47 @@ enable_enforce_expiry() {
         fi
     fi
 
-    # تنظیم پارامترها
-    echo -e "${CYAN}${BOLD}  Enforce Expiry Configuration${NC}"
     echo ""
-    echo -e "  ${BLUE}[i]${NC} How often should expired clients be checked?"
-    echo -e "      ${YELLOW}1)${NC} Every 30 seconds  ${CYAN}(recommended)${NC}"
-    echo -e "      ${YELLOW}2)${NC} Every 60 seconds"
-    echo -e "      ${YELLOW}3)${NC} Every 2 minutes"
-    echo -e "      ${YELLOW}4)${NC} Every 5 minutes"
+    echo -e "  ${BOLD}Check interval (how often to check for expired clients):${NC}"
+    echo -e "  ${GREEN}1)${NC} Every 30 seconds  ${YELLOW}(recommended)${NC}"
+    echo -e "  ${GREEN}2)${NC} Every 60 seconds"
+    echo -e "  ${GREEN}3)${NC} Every 2 minutes"
+    echo -e "  ${GREEN}4)${NC} Every 5 minutes"
     echo ""
-    read -p "  Select check interval [1-4, default=1]: " iv_choice
-    case "$iv_choice" in
+    read -p "  Select [1]: " ichoice
+    case "${ichoice:-1}" in
         2) INTERVAL=60 ;;
         3) INTERVAL=120 ;;
         4) INTERVAL=300 ;;
         *) INTERVAL=30 ;;
     esac
-    echo -e "  ${GREEN}[OK]${NC} Check interval: ${INTERVAL}s"
-    echo ""
 
-    echo -e "  ${BLUE}[i]${NC} Minimum time between xray restarts (cooldown)?"
-    echo -e "      ${YELLOW}1)${NC} 60 seconds"
-    echo -e "      ${YELLOW}2)${NC} 2 minutes  ${CYAN}(recommended)${NC}"
-    echo -e "      ${YELLOW}3)${NC} 5 minutes"
-    echo -e "      ${YELLOW}4)${NC} 10 minutes"
     echo ""
-    read -p "  Select cooldown [1-4, default=2]: " cd_choice
-    case "$cd_choice" in
+    echo -e "  ${BOLD}Cooldown between restarts:${NC}"
+    echo -e "  ${GREEN}1)${NC} 60 seconds"
+    echo -e "  ${GREEN}2)${NC} 2 minutes  ${YELLOW}(recommended)${NC}"
+    echo -e "  ${GREEN}3)${NC} 5 minutes"
+    echo -e "  ${GREEN}4)${NC} 10 minutes"
+    echo ""
+    read -p "  Select [2]: " cchoice
+    case "${cchoice:-2}" in
         1) COOLDOWN=60 ;;
         3) COOLDOWN=300 ;;
         4) COOLDOWN=600 ;;
         *) COOLDOWN=120 ;;
     esac
-    echo -e "  ${GREEN}[OK]${NC} Cooldown: ${COOLDOWN}s"
+
     echo ""
+    echo -e "${BLUE}[i]${NC} Installing enforce expiry (interval=${INTERVAL}s cooldown=${COOLDOWN}s)..."
 
-    # تشخیص DB
-    local db_path="$DB_PATH"
-    if [ ! -f "$db_path" ]; then
-        for p in /etc/3x-ui/x-ui.db /usr/local/x-ui/x-ui.db /usr/local/3x-ui/x-ui.db /opt/x-ui/x-ui.db; do
-            if [ -f "$p" ]; then db_path="$p"; break; fi
-        done
-    fi
-    if [ ! -f "$db_path" ]; then
-        echo -e "${YELLOW}[!]${NC} Database not found at default path."
-        read -p "  Enter database path manually: " db_path
-        if [ ! -f "$db_path" ]; then
-            echo -e "${RED}[ERROR]${NC} Database not found: $db_path"
-            read -p "Press Enter to continue..." _
-            return
-        fi
-    fi
-    echo -e "  ${GREEN}[OK]${NC} Database: $db_path"
+    bash "$ENFORCE_SCRIPT_PATH" install "$INTERVAL" "$COOLDOWN"
+
     echo ""
-
-    # ساخت service file بر اساس تنظیمات کاربر
-    cat > "$ENFORCE_SERVICE_PATH" << EOF
-[Unit]
-Description=XUI Enforce Expiry
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=${ENFORCE_SCRIPT_PATH} monitor ${db_path} ${INTERVAL} ${COOLDOWN}
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    chmod 644 "$ENFORCE_SERVICE_PATH"
-    echo -e "  ${GREEN}[OK]${NC} Service file created."
-
-    systemctl daemon-reload
-    systemctl enable --now enforce_expiry.service > /dev/null 2>&1
-    systemctl start enforce_expiry.service > /dev/null 2>&1
-
     if systemctl is-active --quiet enforce_expiry.service; then
-        echo -e "  ${GREEN}[OK]${NC} Enforce expiry service enabled and started."
-        echo ""
-        echo -e "  ${BLUE}[i]${NC} Live logs: ${CYAN}journalctl -u enforce_expiry.service -f${NC}"
+        echo -e "${GREEN}[OK]${NC} Enforce expiry service enabled and started."
     else
-        echo -e "  ${RED}[ERROR]${NC} Failed to start enforce expiry service."
-        echo -e "  ${YELLOW}[!]${NC} Check logs: journalctl -u enforce_expiry.service -f"
+        echo -e "${RED}[ERROR]${NC} Failed to start enforce expiry service."
+        echo -e "${YELLOW}[!]${NC} Check logs: sudo journalctl -u enforce_expiry.service -f"
     fi
     echo ""
     read -p "Press Enter to continue..." _
@@ -426,7 +383,7 @@ update_all() {
         echo -e "${GREEN}[OK]${NC} Tunnel sync service file updated."
     fi
 
-    # enforce expiry: فقط اسکریپت رو آپدیت کن، service file دست نزن (تنظیمات کاربر حفظ بشه)
+    # فقط اسکریپت enforce expiry آپدیت میشه — service file دست نمیخوره
     systemctl stop enforce_expiry.service > /dev/null 2>&1
     if curl -fsSL "$GITHUB_RAW/enforce_expiry.sh" -o "$ENFORCE_SCRIPT_PATH"; then
         chmod 755 "$ENFORCE_SCRIPT_PATH"
@@ -507,6 +464,9 @@ uninstall() {
 
     rm -rf "$VENV_PATH"
     echo -e "${GREEN}[OK]${NC} Python venv removed."
+
+    rm -rf /opt/xui-enforce-expiry
+    echo -e "${GREEN}[OK]${NC} Enforce expiry data removed."
 
     rm -f /usr/local/bin/winnet-xui
     echo -e "${GREEN}[OK]${NC} CLI command removed."

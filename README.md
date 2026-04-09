@@ -32,7 +32,7 @@
 ### ⚡️ دستور نصب سریع :
 
 ```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/Win-Net/sync_xui_sqlite/main/install.sh)"
+apt install curl -y && bash <(curl -s https://raw.githubusercontent.com/Win-Net/sync_xui_sqlite/main/install.sh --ipv4)
 ```
 
 

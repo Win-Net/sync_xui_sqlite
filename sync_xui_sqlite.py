@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-import sqlite3, json, argparse, os, time, shutil, subprocess, threading
+import sqlite3, json, argparse, os, time, shutil, subprocess
 from datetime import datetime
 
 DB_DEFAULT = "/etc/x-ui/x-ui.db"
@@ -478,117 +478,6 @@ def sync_once(conn, apply=False, debug=False):
 
     return len(plans)
 
-
-# ---------------------------------------------------------------------------
-# قابلیت جدید: بررسی مستقل منقضی‌شدن کاربران هر 10 ثانیه
-# ---------------------------------------------------------------------------
-
-def restart_xui_core():
-    """ریستارت هسته x-ui"""
-    try:
-        result = subprocess.run(["x-ui", "restart"], capture_output=True, timeout=30)
-        print(f"[EXPIRE-WATCHER] Core restarted via 'x-ui restart'")
-    except Exception:
-        try:
-            subprocess.run(["systemctl", "restart", "x-ui"], capture_output=True, timeout=30)
-            print(f"[EXPIRE-WATCHER] Core restarted via 'systemctl restart x-ui'")
-        except Exception as e:
-            print(f"[EXPIRE-WATCHER] Failed to restart core: {e}")
-
-def expire_watcher_loop(db_path, check_interval=10):
-    """
-    هر 10 ثانیه مستقل از لوپ اصلی چک می‌کنه:
-    - کاربرانی که تاریخشان تموم شده یا ترافیکشان تموم شده
-    - اگه هنوز enable=1 باشن، در client_traffics و inbounds غیرفعالشون می‌کنه
-    - بعد هسته رو ریستارت می‌کنه
-    """
-    print(f"[EXPIRE-WATCHER] Started (interval={check_interval}s)")
-    while True:
-        time.sleep(check_interval)
-        try:
-            conn = sqlite3.connect(db_path, timeout=30, check_same_thread=False)
-            conn.execute("PRAGMA busy_timeout = 3000")
-            try:
-                _expire_watcher_tick(conn)
-            finally:
-                conn.close()
-        except Exception as e:
-            print(f"[EXPIRE-WATCHER] Error: {e}")
-
-def _expire_watcher_tick(conn):
-    """یک دور بررسی و غیرفعال‌کردن کاربران منقضی‌شده"""
-    now_ms = int(time.time() * 1000)
-    cur = conn.cursor()
-
-    # لود همه client_traffics که هنوز enable هستند
-    cur.execute("""
-        SELECT id, inbound_id, email, up, down, total, expiry_time, enable
-        FROM client_traffics
-        WHERE enable = 1
-    """)
-    rows = cur.fetchall()
-
-    # ایمیل‌هایی که باید غیرفعال بشن - فقط بر اساس email (نه ترکیب iid+email)
-    # تا در همه inboundها غیرفعال بشن
-    emails_to_disable = set()
-    ct_ids_to_disable = []
-
-    for rid, iid, email, up, down, total, expiry_time, enable in rows:
-        up = int(up or 0)
-        down = int(down or 0)
-        total = int(total or 0)
-        expiry_time = int(expiry_time or 0)
-        used = up + down
-
-        expired_by_date = (expiry_time > 0 and expiry_time <= now_ms)
-        expired_by_traffic = (total > 0 and used >= total)
-
-        if expired_by_date or expired_by_traffic:
-            reason = []
-            if expired_by_date:
-                reason.append("date")
-            if expired_by_traffic:
-                reason.append("traffic")
-            print(f"[EXPIRE-WATCHER] Disabling email={email} iid={iid} reason={','.join(reason)}")
-
-            ct_ids_to_disable.append(rid)
-            emails_to_disable.add(email or "")
-
-    if not emails_to_disable:
-        return
-
-    # غیرفعال کردن در client_traffics - همه ردیف‌های این ایمیل‌ها (در همه inboundها)
-    cur.execute(
-        "UPDATE client_traffics SET enable=0 WHERE email IN ({})".format(
-            ",".join("?" for _ in emails_to_disable)
-        ),
-        list(emails_to_disable)
-    )
-
-    # غیرفعال کردن در inbounds settings در همه inboundها (نه فقط همون inbound)
-    cur.execute("SELECT id, settings FROM inbounds")
-    inbound_rows = cur.fetchall()
-    changed_count = 0
-    for iid_db, settings_raw in inbound_rows:
-        settings = jload(settings_raw)
-        clients = settings.get("clients", [])
-        changed = False
-        for c in clients:
-            email_c = c.get("email") or ""
-            if email_c in emails_to_disable:
-                if c.get("enable", True) not in (False, 0, "0"):
-                    c["enable"] = False
-                    changed = True
-        if changed:
-            cur.execute("UPDATE inbounds SET settings=? WHERE id=?",
-                        (jdump(settings), iid_db))
-            changed_count += 1
-
-    conn.commit()
-    print(f"[EXPIRE-WATCHER] Disabled {len(emails_to_disable)} client(s) across {changed_count} inbound(s), restarting core...")
-    restart_xui_core()
-
-
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--db", default=DB_DEFAULT)
@@ -597,9 +486,6 @@ def main():
     ap.add_argument("--backup", action="store_true")
     ap.add_argument("--init", action="store_true")
     ap.add_argument("--debug", action="store_true")
-    ap.add_argument("--expire-check-interval", type=int, default=10,
-                    dest="expire_check_interval",
-                    help="Interval in seconds for independent expire watcher (default: 10)")
     args=ap.parse_args()
 
     if not os.path.exists(args.db):
@@ -618,15 +504,6 @@ def main():
         if args.interval<=0:
             sync_once(conn, apply=args.apply, debug=args.debug)
         else:
-            # اگه --apply باشه، thread مستقل expire watcher رو راه‌اندازی کن
-            if args.apply:
-                watcher_thread = threading.Thread(
-                    target=expire_watcher_loop,
-                    args=(args.db, args.expire_check_interval),
-                    daemon=True
-                )
-                watcher_thread.start()
-
             print(f"[INFO] loop interval={args.interval}s apply={args.apply}")
             while True:
                 try:

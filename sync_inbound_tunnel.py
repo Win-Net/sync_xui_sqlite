@@ -269,11 +269,11 @@ def sync_once(conn, apply=False, debug=False):
 def restart_xui_core():
     """ریستارت هسته x-ui"""
     try:
-        subprocess.run(["x-ui", "restart"], check=True, capture_output=True)
+        subprocess.run(["x-ui", "restart"], capture_output=True, timeout=30)
         print(f"[EXPIRE-WATCHER] Core restarted via 'x-ui restart'")
     except Exception:
         try:
-            subprocess.run(["systemctl", "restart", "x-ui"], check=True, capture_output=True)
+            subprocess.run(["systemctl", "restart", "x-ui"], capture_output=True, timeout=30)
             print(f"[EXPIRE-WATCHER] Core restarted via 'systemctl restart x-ui'")
         except Exception as e:
             print(f"[EXPIRE-WATCHER] Failed to restart core: {e}")
@@ -284,7 +284,7 @@ def expire_watcher_loop(db_path, check_interval=10):
     - tunnel inboundهایی که تاریخشان تموم شده یا ترافیکشان تموم شده
     - اگه هنوز enable=1 باشن، غیرفعالشون می‌کنه
     - بعد هسته رو ریستارت می‌کنه
-    همچنین inboundهایی که فقط یک عدد هستند (بدون گروه) هم بررسی می‌شوند
+    inboundهایی که تنها یک عدد هم هستند (بدون گروه) هم بررسی می‌شوند
     """
     print(f"[EXPIRE-WATCHER] Started (interval={check_interval}s)")
     while True:
@@ -302,9 +302,10 @@ def expire_watcher_loop(db_path, check_interval=10):
 def _expire_watcher_tick(conn):
     """یک دور بررسی و غیرفعال‌کردن tunnel inboundهای منقضی‌شده"""
     now_ms = int(time.time() * 1000)
+    now_s  = int(time.time())
     cur = conn.cursor()
 
-    # لود همه tunnel inboundهایی که هنوز enable هستند
+    # لود همه tunnel inboundهایی که هنوز enable هستند - بدون هیچ محدودیت گروه‌بندی
     placeholders = ",".join("?" for _ in TUNNEL_PROTOCOLS)
     cur.execute(f"""
         SELECT id, remark, protocol, up, down, total, expiry_time, enable
@@ -317,13 +318,22 @@ def _expire_watcher_tick(conn):
     disabled_ids = []
 
     for iid, remark, protocol, up, down, total, expiry_time, enable in rows:
-        up = int(up or 0)
-        down = int(down or 0)
-        total = int(total or 0)
+        up          = int(up or 0)
+        down        = int(down or 0)
+        total       = int(total or 0)
         expiry_time = int(expiry_time or 0)
-        used = up + down
+        used        = up + down
 
-        expired_by_date = (expiry_time > 0 and expiry_time <= now_ms)
+        # expiry_time ممکنه میلی‌ثانیه یا ثانیه باشه - هر دو رو پوشش میدیم
+        if expiry_time > 0:
+            # اگه مقدار بزرگتر از سال 3000 میلادی در ثانیه باشه، یعنی میلی‌ثانیه‌ست
+            if expiry_time > 32503680000:
+                expired_by_date = expiry_time <= now_ms
+            else:
+                expired_by_date = expiry_time <= now_s
+        else:
+            expired_by_date = False
+
         expired_by_traffic = (total > 0 and used >= total)
 
         if expired_by_date or expired_by_traffic:
@@ -338,9 +348,13 @@ def _expire_watcher_tick(conn):
     if not disabled_ids:
         return
 
-    # غیرفعال کردن inboundها
-    for iid in disabled_ids:
-        cur.execute("UPDATE inbounds SET enable=0 WHERE id=?", (iid,))
+    # غیرفعال کردن همه inboundهای منقضی‌شده
+    cur.execute(
+        "UPDATE inbounds SET enable=0 WHERE id IN ({})".format(
+            ",".join("?" for _ in disabled_ids)
+        ),
+        disabled_ids
+    )
 
     conn.commit()
     print(f"[EXPIRE-WATCHER] Disabled {len(disabled_ids)} tunnel inbound(s), restarting core...")

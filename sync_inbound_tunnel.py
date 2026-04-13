@@ -296,12 +296,11 @@ def restart_xui_core():
         print(f"[EXPIRY-WATCHER] Failed to restart core: {e}")
 
 
-def check_any_tunnel_expired(db_path):
+def disable_expired_tunnels(db_path, debug=False):
     """
-    بررسی می‌کنه آیا حداقل یک اینباند تانل منقضی شده:
-    1. تاریخ انقضا گذشته (expiry_time > 0 and expiry_time <= now)
-    2. ترافیک تموم شده (total > 0 and up+down >= total)
-    این چک برای همه اینباندهای tunnel/tun انجام میشه، حتی اگه تنها یک اینباند باشه
+    اینباندهای تانل منقضی رو پیدا می‌کنه و enable=0 می‌ذاره توی دیتابیس
+    قبل از ریستارت هسته باید اجرا بشه تا هسته با کانفیگ درست بالا بیاد
+    برمی‌گردونه True اگه حداقل یک اینباند منقضی disable شده باشه
     """
     try:
         conn = sqlite3.connect(db_path, timeout=10, check_same_thread=False)
@@ -311,34 +310,41 @@ def check_any_tunnel_expired(db_path):
 
         placeholders = ",".join("?" for _ in TUNNEL_PROTOCOLS)
         cur.execute(f"""
-            SELECT id, remark, protocol, up, down, total, expiry_time
+            SELECT id, remark, protocol, up, down, total, expiry_time, enable
             FROM inbounds
             WHERE LOWER(protocol) IN ({placeholders})
+              AND enable = 1
               AND (
                 (expiry_time > 0 AND expiry_time <= ?)
                 OR
                 (total > 0 AND (up + down) >= total)
               )
-            LIMIT 1
         """, [p.lower() for p in TUNNEL_PROTOCOLS] + [now_ms])
 
-        row = cur.fetchone()
-        conn.close()
+        rows = cur.fetchall()
+        if not rows:
+            conn.close()
+            return False
 
-        if row:
-            iid, remark, protocol, up, down, total, expiry_time = row
+        disabled_count = 0
+        for iid, remark, protocol, up, down, total, expiry_time, enable in rows:
             reason = []
             if expiry_time > 0 and expiry_time <= now_ms:
                 reason.append("date_expired")
             if total > 0 and (up + down) >= total:
                 reason.append("traffic_exhausted")
-            print(f"[EXPIRY-WATCHER] Expired tunnel inbound detected: id={iid} remark={remark} reason={','.join(reason)}")
-            return True
+            # disable کردن اینباند
+            cur.execute("UPDATE inbounds SET enable=0 WHERE id=?", (iid,))
+            print(f"[EXPIRY-WATCHER] Disabled tunnel inbound: id={iid} remark={remark} reason={','.join(reason)}")
+            disabled_count += 1
 
-        return False
+        conn.commit()
+        conn.close()
+        print(f"[EXPIRY-WATCHER] Disabled {disabled_count} expired tunnel inbound(s) in DB")
+        return True
 
     except Exception as e:
-        print(f"[EXPIRY-WATCHER] Error checking tunnel expiry: {e}")
+        print(f"[EXPIRY-WATCHER] Error disabling expired tunnels: {e}")
         return False
 
 
@@ -356,7 +362,10 @@ def expiry_watcher_loop(db_path, check_interval=10):
     while True:
         try:
             time.sleep(check_interval)
-            if check_any_tunnel_expired(db_path):
+            # اول disable می‌کنیم توی دیتابیس، بعد ریستارت می‌کنیم
+            # اینطوری هسته با enable=0 بالا میاد و اتصال قطع می‌مونه
+            had_expired = disable_expired_tunnels(db_path)
+            if had_expired:
                 now = time.time()
                 if now - last_restart_time >= min_restart_gap:
                     restart_xui_core()

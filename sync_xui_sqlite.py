@@ -513,10 +513,11 @@ def restart_xui_core():
         print(f"[EXPIRY-WATCHER] Failed to restart core: {e}")
 
 
-def check_any_client_expired(db_path):
+def disable_expired_clients(db_path, debug=False):
     """
-    بررسی می‌کنه آیا حداقل یک کاربر در client_traffics منقضی شده
-    (ترافیک تموم شده یا تاریخ گذشته) ولی هنوز enable=1 هست
+    کاربران منقضی رو پیدا می‌کنه و enable=0 می‌ذاره توی دیتابیس
+    قبل از ریستارت هسته باید اجرا بشه تا هسته با کانفیگ درست بالا بیاد
+    برمی‌گردونه True اگه حداقل یک کاربر منقضی پیدا و disable شده باشه
     """
     try:
         conn = sqlite3.connect(db_path, timeout=10, check_same_thread=False)
@@ -524,11 +525,9 @@ def check_any_client_expired(db_path):
         cur = conn.cursor()
         now_ms = int(time.time() * 1000)
 
-        # کاربرانی که enable=1 هستن ولی باید disable بشن:
-        # 1. تاریخ انقضا گذشته (expiry_time > 0 and expiry_time <= now)
-        # 2. ترافیک تموم شده (total > 0 and up+down >= total)
+        # پیدا کردن کاربران منقضی که هنوز enable=1 هستن
         cur.execute("""
-            SELECT id, email, up, down, total, expiry_time, enable
+            SELECT id, email, up, down, total, expiry_time
             FROM client_traffics
             WHERE enable = 1
               AND (
@@ -536,26 +535,32 @@ def check_any_client_expired(db_path):
                 OR
                 (total > 0 AND (up + down) >= total)
               )
-            LIMIT 1
         """, (now_ms,))
 
-        row = cur.fetchone()
-        conn.close()
+        rows = cur.fetchall()
+        if not rows:
+            conn.close()
+            return False
 
-        if row:
-            rid, email, up, down, total, expiry_time, enable = row
+        disabled_count = 0
+        for rid, email, up, down, total, expiry_time in rows:
             reason = []
             if expiry_time > 0 and expiry_time <= now_ms:
                 reason.append("date_expired")
             if total > 0 and (up + down) >= total:
                 reason.append("traffic_exhausted")
-            print(f"[EXPIRY-WATCHER] Expired client detected: email={email} reason={','.join(reason)}")
-            return True
+            # disable کردن در client_traffics
+            cur.execute("UPDATE client_traffics SET enable=0 WHERE id=?", (rid,))
+            print(f"[EXPIRY-WATCHER] Disabled client: email={email} reason={','.join(reason)}")
+            disabled_count += 1
 
-        return False
+        conn.commit()
+        conn.close()
+        print(f"[EXPIRY-WATCHER] Disabled {disabled_count} expired client(s) in DB")
+        return True
 
     except Exception as e:
-        print(f"[EXPIRY-WATCHER] Error checking expiry: {e}")
+        print(f"[EXPIRY-WATCHER] Error disabling expired clients: {e}")
         return False
 
 
@@ -573,7 +578,10 @@ def expiry_watcher_loop(db_path, check_interval=10):
     while True:
         try:
             time.sleep(check_interval)
-            if check_any_client_expired(db_path):
+            # اول disable می‌کنیم توی دیتابیس، بعد ریستارت می‌کنیم
+            # اینطوری هسته با enable=0 بالا میاد و کاربر نمی‌تونه وصل بشه
+            had_expired = disable_expired_clients(db_path)
+            if had_expired:
                 now = time.time()
                 if now - last_restart_time >= min_restart_gap:
                     restart_xui_core()

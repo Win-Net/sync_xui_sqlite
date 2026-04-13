@@ -147,6 +147,14 @@ def ensure_seed(conn, debug=False):
     conn.commit()
     if debug: print(f"[INFO] seeded {n} entries")
 
+def restart_xui_core():
+    """ریستارت هسته x-ui برای قطع اتصال کاربران منقضی‌شده"""
+    try:
+        subprocess.run(["x-ui", "restart"], check=True, capture_output=True)
+        print("[INFO] x-ui core restarted (expired client detected)")
+    except Exception as e:
+        print(f"[WARN] x-ui restart failed: {e}")
+
 def sync_once(conn, apply=False, debug=False):
     ensure_meta(conn)
     cur=conn.cursor()
@@ -338,6 +346,9 @@ def sync_once(conn, apply=False, debug=False):
         cur.execute("UPDATE inbounds SET settings=? WHERE id=?", (jdump(s), iid))
 
     ct_writes=0; set_writes=0
+    # ردیابی اینکه آیا در این سیکل کاربری از enabled به disabled رفت
+    client_just_expired = False
+
     for p in plans:
         iid=p["iid"]; email=p["email"]; ch=p["changes"]; ref=p["ref_sig"]; reset_flag=p.get("reset_flag", False)
 
@@ -407,6 +418,10 @@ def sync_once(conn, apply=False, debug=False):
             new_enable = en0
             if "enable" in ch:
                 new_enable = int(ch["enable"][1])
+                # اگر کاربر در این اینباند از فعال به غیرفعال رفت → نشانه‌گذاری برای ریستارت هسته
+                if en0 == 1 and new_enable == 0:
+                    client_just_expired = True
+                    print(f"[INFO] Client expired: sub={p['sub']} email={email} inbound={iid}")
 
             if rid:
                 cur.execute("UPDATE client_traffics SET up=?,down=?,total=?,expiry_time=?,enable=?,reset=0 WHERE id=?",
@@ -475,6 +490,10 @@ def sync_once(conn, apply=False, debug=False):
 
     conn.commit()
     print(f"[APPLIED] settings_updated={set_writes}, traffic_rows_written={ct_writes}")
+
+    # اگر در این سیکل کاربری منقضی شد → فوری ریستارت هسته تا اتصالش قطع بشه
+    if client_just_expired:
+        restart_xui_core()
 
     return len(plans)
 

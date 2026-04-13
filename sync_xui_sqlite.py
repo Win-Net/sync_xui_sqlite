@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-import sqlite3, json, argparse, os, time, shutil, subprocess
+import sqlite3, json, argparse, os, time, shutil, subprocess, threading
 from datetime import datetime
 
 DB_DEFAULT = "/etc/x-ui/x-ui.db"
@@ -154,6 +154,34 @@ def restart_xui_core():
         print("[INFO] x-ui core restarted (expired client detected)")
     except Exception as e:
         print(f"[WARN] x-ui restart failed: {e}")
+
+# وضعیت قبلی enable کاربران برای تشخیص لحظه انقضا
+_prev_enable_state: dict = {}
+
+def check_expired_and_restart(conn):
+    """
+    هر چند ثانیه یک‌بار فقط client_traffics رو چک می‌کنه.
+    اگر کاربری که قبلاً enable=1 بود الان enable=0 شده باشه → فوری ریستارت.
+    """
+    global _prev_enable_state
+    cur = conn.cursor()
+    cur.execute("SELECT inbound_id, email, enable FROM client_traffics")
+    rows = cur.fetchall()
+
+    need_restart = False
+    new_state = {}
+    for iid, email, enable in rows:
+        key = (int(iid), email or "")
+        cur_enable = int(0 if enable in (0, "0", False) else 1)
+        new_state[key] = cur_enable
+        prev = _prev_enable_state.get(key)
+        if prev is not None and prev == 1 and cur_enable == 0:
+            print(f"[EXPIRED] inbound={iid} email={email} → enable changed 1→0, restarting core")
+            need_restart = True
+
+    _prev_enable_state = new_state
+    if need_restart:
+        restart_xui_core()
 
 def sync_once(conn, apply=False, debug=False):
     ensure_meta(conn)
@@ -516,7 +544,7 @@ def main():
         print("[INFO] Backup:", f"{args.db}.bak_{ts}")
 
     conn=sqlite3.connect(args.db, timeout=60, check_same_thread=False)
-    conn.execute("PRAGMA busy_timeout = 3000")  # تنظیم زمان انتظار برای دیتابیس
+    conn.execute("PRAGMA busy_timeout = 3000")
     try:
         if args.init:
             ensure_seed(conn, debug=args.debug); return
@@ -524,6 +552,25 @@ def main():
             sync_once(conn, apply=args.apply, debug=args.debug)
         else:
             print(f"[INFO] loop interval={args.interval}s apply={args.apply}")
+
+            # --- thread جداگانه برای بررسی انقضا هر 5 ثانیه ---
+            # اول یک snapshot از وضعیت فعلی می‌گیره تا کاربرهایی که
+            # از قبل disable بودن باعث ریستارت غیرضروری نشن
+            check_expired_and_restart(conn)  # populate _prev_enable_state بدون ریستارت
+
+            def expiry_watcher():
+                while True:
+                    time.sleep(5)
+                    try:
+                        check_expired_and_restart(conn)
+                    except Exception as e:
+                        print("[ERROR] expiry_watcher:", e)
+
+            t = threading.Thread(target=expiry_watcher, daemon=True)
+            t.start()
+            print("[INFO] expiry_watcher started (check every 5s)")
+
+            # --- حلقه اصلی sync ---
             while True:
                 try:
                     sync_once(conn, apply=args.apply, debug=args.debug)
